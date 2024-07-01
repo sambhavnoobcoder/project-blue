@@ -1,11 +1,16 @@
 import yfinance as yf
 import pandas as pd
-from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, TimeSeriesSplit
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import xgboost as xgb
+import lightgbm as lgb
+from scipy.stats import randint, uniform
 
 
 def get_stock_data(ticker):
@@ -41,22 +46,53 @@ def add_features(data):
 
 
 def train_model(X_train, y_train):
-    model = RandomForestRegressor(random_state=42)
+    pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+        ('model', RandomForestRegressor(random_state=42))
+    ])
 
-    param_grid = {
-        'n_estimators': [100, 200, 500],
-        'max_features': ['auto', 'sqrt', 'log2'],
-        'max_depth': [10, 20, 50, None],
-        'min_samples_split': [2, 5, 10],
-        'min_samples_leaf': [1, 2, 4]
+    param_dist = {
+        'model__n_estimators': randint(100, 1000),
+        'model__max_features': ['auto', 'sqrt', 'log2'],
+        'model__max_depth': randint(10, 100),
+        'model__min_samples_split': randint(2, 20),
+        'model__min_samples_leaf': randint(1, 10)
     }
 
     tscv = TimeSeriesSplit(n_splits=5)
-    grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=tscv, n_jobs=-1,
-                               scoring='neg_mean_absolute_error')
-    grid_search.fit(X_train, y_train)
+    random_search = RandomizedSearchCV(estimator=pipeline, param_distributions=param_dist,
+                                       n_iter=100, cv=tscv, n_jobs=-1, random_state=42,
+                                       scoring='neg_mean_absolute_error')
+    random_search.fit(X_train, y_train)
 
-    best_model = grid_search.best_estimator_
+    best_model = random_search.best_estimator_
+
+    return best_model
+
+
+def train_ensemble_model(X_train, y_train):
+    rf = RandomForestRegressor(random_state=42)
+    gb = GradientBoostingRegressor(random_state=42)
+    xg = xgb.XGBRegressor(random_state=42)
+    lg = lgb.LGBMRegressor(random_state=42)
+
+    models = {
+        'RandomForest': rf,
+        'GradientBoosting': gb,
+        'XGBoost': xg,
+        'LightGBM': lg
+    }
+
+    best_model = None
+    best_score = float('inf')
+
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        score = mean_absolute_error(y_train, model.predict(X_train))
+        print(f"{name} training MAE: {score}")
+        if score < best_score:
+            best_score = score
+            best_model = model
 
     return best_model
 
@@ -121,7 +157,8 @@ def get_best_stock(stock_list, plot_dir='plots'):
             y_test = test_data['Close']
 
             # Train the model
-            model = train_model(X_train, y_train)
+            # model = train_model(X_train, y_train)
+            model = train_ensemble_model(X_train, y_train)
 
             # Predict and evaluate on test data
             test_data['Predicted_Close'] = predict(model, X_test)
