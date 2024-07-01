@@ -1,0 +1,156 @@
+import yfinance as yf
+import pandas as pd
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+
+def get_stock_data(ticker):
+    stock = yf.Ticker(ticker)
+    data = stock.history(period="max")
+    return data
+
+
+def preprocess_data(data):
+    data['MA50'] = data['Close'].rolling(window=50).mean()
+    data['MA200'] = data['Close'].rolling(window=200).mean()
+    data['Volatility'] = data['Close'].rolling(window=50).std()
+    data['RSI'] = compute_rsi(data['Close'])
+    data = data.dropna()
+    return data
+
+
+def compute_rsi(series, window=14):
+    delta = series.diff(1)
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+
+def add_features(data):
+    data['Daily Return'] = data['Close'].pct_change()
+    data['Daily Return'].fillna(0, inplace=True)
+    data['MA Ratio'] = data['MA50'] / data['MA200']
+    data['High-Low'] = data['High'] - data['Low']
+    data['Open-Close'] = data['Open'] - data['Close']
+    return data
+
+
+def train_model(X_train, y_train):
+    model = RandomForestRegressor(random_state=42)
+
+    param_grid = {
+        'n_estimators': [100, 200, 500],
+        'max_features': ['auto', 'sqrt', 'log2'],
+        'max_depth': [10, 20, 50, None],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4]
+    }
+
+    tscv = TimeSeriesSplit(n_splits=5)
+    grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=tscv, n_jobs=-1,
+                               scoring='neg_mean_absolute_error')
+    grid_search.fit(X_train, y_train)
+
+    best_model = grid_search.best_estimator_
+
+    return best_model
+
+
+def predict(model, X):
+    predictions = model.predict(X)
+    return predictions
+
+
+def evaluate_model(y_true, y_pred):
+    mae = mean_absolute_error(y_true, y_pred)
+    return mae
+
+
+def plot_predictions(actual, predicted, title, filename):
+    plt.figure(figsize=(14, 7))
+    plt.plot(actual.index, actual.values, label='Actual')
+    plt.plot(predicted.index, predicted.values, label='Predicted')
+    plt.title(title)
+    plt.xlabel('Date')
+    plt.ylabel('Close Price')
+    plt.legend()
+    plt.savefig(filename)
+    plt.close()
+
+
+# List of some NSE stocks for demonstration purposes
+nse_stock_list = ['RELIANCE.NS', 'TCS.NS', 'INFY.NS', 'HDFCBANK.NS', 'ICICIBANK.NS']
+
+
+# Function to get the best stock
+def get_best_stock(stock_list, plot_dir='plots'):
+    best_mae = np.inf
+    best_stock = None
+    best_model = None
+    best_data = None
+    stock_accuracies = {}
+
+    # Create plot directory if it doesn't exist
+    if not os.path.exists(plot_dir):
+        os.makedirs(plot_dir)
+
+    for ticker in stock_list:
+        print(f"Processing {ticker}...")
+        try:
+            data = get_stock_data(ticker)
+            last_entry_date = data.index[-1]  # Get the date of the last entry
+            print(f"Last data entry for {ticker}: {last_entry_date}")
+            data = preprocess_data(data)
+            data = add_features(data)
+
+            # Splitting the data
+            split_index = int(len(data) * 0.9)
+            train_data = data.iloc[:split_index]
+            test_data = data.iloc[split_index:]
+
+            X_train = train_data[
+                ['MA50', 'MA200', 'Volatility', 'Daily Return', 'MA Ratio', 'RSI', 'High-Low', 'Open-Close']]
+            y_train = train_data['Close']
+            X_test = test_data[
+                ['MA50', 'MA200', 'Volatility', 'Daily Return', 'MA Ratio', 'RSI', 'High-Low', 'Open-Close']]
+            y_test = test_data['Close']
+
+            # Train the model
+            model = train_model(X_train, y_train)
+
+            # Predict and evaluate on test data
+            test_data['Predicted_Close'] = predict(model, X_test)
+            mae = evaluate_model(y_test, test_data['Predicted_Close'])
+
+            # Store the accuracy for this stock
+            stock_accuracies[ticker] = mae
+
+            # Plotting actual vs. predicted close prices and save plot
+            plot_filename = os.path.join(plot_dir, f"{ticker}_actual_vs_predicted.png")
+            plot_predictions(y_test, test_data['Predicted_Close'], f"{ticker} - Actual vs Predicted", plot_filename)
+
+            if mae < best_mae:
+                best_mae = mae
+                best_stock = ticker
+                best_model = model
+                best_data = test_data
+        except Exception as e:
+            print(f"Failed to process {ticker}: {e}")
+            continue
+
+    return best_stock, best_mae, best_model, best_data, stock_accuracies
+
+
+best_stock, best_mae, best_model, best_data, stock_accuracies = get_best_stock(nse_stock_list)
+
+print(f"Best stock: {best_stock}")
+print(f"Mean Absolute Error: {best_mae}")
+print("Accuracy for each stock:")
+for stock, mae in stock_accuracies.items():
+    print(f"{stock}: MAE = {mae}")
+print(best_data.tail())
